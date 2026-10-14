@@ -316,7 +316,7 @@ fn render_text_with_shadow<T: ParsedFontTrait + 'static>(
     ops: &mut Vec<Op>,
     layout: &azul_layout::text3::cache::UnifiedLayout,
     bounds: &LogicalRect,
-    color: ColorU,
+    _color: ColorU,
     shadow: Option<&StyleBoxShadow>,
     transform: &CoordTransform,
     font_manager: &FontManager<T>,
@@ -343,10 +343,10 @@ fn render_text_with_shadow<T: ParsedFontTrait + 'static>(
                 origin: LogicalPosition::new(bounds.origin.x + dx + ox, bounds.origin.y + dy + oy),
                 size: bounds.size,
             };
-            render_unified_layout_with_margins(ops, layout, &shifted, c, transform, font_manager, bridge_res);
+            render_unified_layout_with_margins(ops, layout, &shifted, Some(c), transform, font_manager, bridge_res);
         }
     }
-    render_unified_layout_with_margins(ops, layout, bounds, color, transform, font_manager, bridge_res);
+    render_unified_layout_with_margins(ops, layout, bounds, None, transform, font_manager, bridge_res);
 }
 
 /// The PDF `cm` matrix for a CSS transform reference frame.
@@ -1297,7 +1297,7 @@ fn render_unified_layout_with_margins<T: ParsedFontTrait + 'static>(
     ops: &mut Vec<Op>,
     layout: &UnifiedLayout,
     bounds: &LogicalRect,
-    _color: ColorU,  // Unused: per-glyph color from layout takes precedence
+    color_override: Option<ColorU>, // None: per-glyph color from layout; Some: force (text-shadow)
     transform: &CoordTransform,
     font_manager: &FontManager<T>,
     bridge_res: &mut BridgeResources,
@@ -1390,14 +1390,15 @@ fn render_unified_layout_with_margins<T: ParsedFontTrait + 'static>(
         }
 
         // Set color if it changed (BEFORE text section)
-        let scoped = begin_translucent_text(ops, Some(&mut *bridge_res), &run.color);
+        let run_color = color_override.unwrap_or(run.color);
+        let scoped = begin_translucent_text(ops, Some(&mut *bridge_res), &run_color);
         if scoped {
             current_color = None;
-        } else if current_color != Some(run.color) {
+        } else if current_color != Some(run_color) {
             ops.push(Op::SetFillColor {
-                col: convert_color(&run.color),
+                col: convert_color(&run_color),
             });
-            current_color = Some(run.color);
+            current_color = Some(run_color);
         }
 
         // Set font (convert CSS px to PDF pt)
