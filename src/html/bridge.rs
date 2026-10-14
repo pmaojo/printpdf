@@ -83,10 +83,19 @@ fn content_name(prefix: &str, content: &str) -> String {
 
 impl BridgeResources {
     /// Record an `ExtGState` and return its id (for `LoadGraphicsState`).
-    /// The id is derived from the state's content, and an identical state is
-    /// recorded once.
+    /// The id is derived from the state's content (the bridge only ever sets
+    /// fill/stroke alpha), and an identical state is recorded once.
     fn add_extgstate(&mut self, gs: ExtendedGraphicsState) -> ExtendedGraphicsStateId {
-        let id = ExtendedGraphicsStateId(content_name("G", &format!("{gs:?}")));
+        // `{gs:?}` is not a stable key: `changed_fields` is a hash set, so its
+        // Debug order varies between runs. Sort the fields explicitly.
+        let mut fields: Vec<String> = gs.changed_fields.iter().map(|f| format!("{f:?}")).collect();
+        fields.sort();
+        let key = format!(
+            "{fields:?}|{}|{}",
+            gs.current_fill_alpha.to_bits(),
+            gs.current_stroke_alpha.to_bits()
+        );
+        let id = ExtendedGraphicsStateId(content_name("G", &key));
         if !self.extgstates.iter().any(|(existing, _)| *existing == id) {
             self.extgstates.push((id.clone(), gs));
         }
