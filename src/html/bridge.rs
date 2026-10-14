@@ -331,7 +331,7 @@ fn render_text_with_shadow<T: ParsedFontTrait + 'static>(
             vec![(0.0, 0.0, 1.0)]
         } else {
             let r = blur / 2.0;
-            vec![(0.0, 0.0, 0.4), (r, 0.0, 0.25), (-r, 0.0, 0.25), (0.0, r, 0.25), (0.0, -r, 0.25)]
+            vec![(0.0, 0.0, 0.3), (r, 0.0, 0.18), (-r, 0.0, 0.18), (0.0, r, 0.18), (0.0, -r, 0.18)]
         };
         for (ox, oy, share) in taps {
             let mut c = shadow.color;
