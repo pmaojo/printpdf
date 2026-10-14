@@ -17,6 +17,7 @@ use azul_core::{
     resources::DecodedImage,
 };
 use azul_css::props::basic::ColorU;
+use azul_css::props::style::box_shadow::StyleBoxShadow;
 use azul_layout::{
     solver3::display_list::{DisplayList, DisplayListItem},
     text3::cache::{FontManager, ParsedFontTrait, UnifiedLayout},
@@ -305,6 +306,49 @@ fn normalize_gradient_stops(
         .collect()
 }
 
+/// Draws a text block, preceded by its `text-shadow` when it has one.
+///
+/// The shadow is the same text drawn again, offset, in the shadow color. A
+/// blur is approximated by spreading a few translucent copies around the
+/// offset position (a real blur would need a rasterized soft mask); a shadow
+/// with no blur is one exact copy.
+fn render_text_with_shadow<T: ParsedFontTrait + 'static>(
+    ops: &mut Vec<Op>,
+    layout: &azul_layout::text3::cache::UnifiedLayout,
+    bounds: &LogicalRect,
+    color: ColorU,
+    shadow: Option<&StyleBoxShadow>,
+    transform: &CoordTransform,
+    font_manager: &FontManager<T>,
+    bridge_res: &mut BridgeResources,
+) {
+    if let Some(shadow) = shadow {
+        let px = |v: &azul_css::props::basic::pixel::PixelValueNoPercent| v.to_pixels_internal(16.0, 16.0);
+        let (dx, dy) = (px(&shadow.offset_x), px(&shadow.offset_y));
+        let blur = px(&shadow.blur_radius).max(0.0);
+        // (offset from the shadow position, share of the shadow's alpha)
+        let taps: Vec<(f32, f32, f32)> = if blur < 0.5 {
+            vec![(0.0, 0.0, 1.0)]
+        } else {
+            let r = blur / 2.0;
+            vec![(0.0, 0.0, 0.4), (r, 0.0, 0.25), (-r, 0.0, 0.25), (0.0, r, 0.25), (0.0, -r, 0.25)]
+        };
+        for (ox, oy, share) in taps {
+            let mut c = shadow.color;
+            c.a = ((c.a as f32) * share).round().clamp(0.0, 255.0) as u8;
+            if c.a == 0 {
+                continue;
+            }
+            let shifted = LogicalRect {
+                origin: LogicalPosition::new(bounds.origin.x + dx + ox, bounds.origin.y + dy + oy),
+                size: bounds.size,
+            };
+            render_unified_layout_with_margins(ops, layout, &shifted, c, transform, font_manager, bridge_res);
+        }
+    }
+    render_unified_layout_with_margins(ops, layout, bounds, color, transform, font_manager, bridge_res);
+}
+
 /// Convert a display list directly to printpdf Ops with margin support.
 /// 
 /// This version applies margins during coordinate transformation:
@@ -347,7 +391,16 @@ pub fn display_list_to_printpdf_ops_with_margins<T: ParsedFontTrait + 'static>(
     // first subsequent `Text` item — the exact place azul's own painting order
     // draws that text — or, if no `Text` item follows, before the next
     // `TextLayout` / any graphics-state scope change / the end of the list.
-    let mut pending_text: Option<(&azul_layout::text3::cache::UnifiedLayout, LogicalRect, ColorU)> = None;
+    let mut pending_text: Option<(
+        &azul_layout::text3::cache::UnifiedLayout,
+        LogicalRect,
+        ColorU,
+        Option<StyleBoxShadow>,
+    )> = None;
+    // Active `text-shadow`s, innermost last. azul brackets an element's inline
+    // content with PushTextShadow/PopTextShadow; the shadow in force when a
+    // TextLayout is met is the one its text is drawn with.
+    let mut text_shadows: Vec<StyleBoxShadow> = Vec::new();
 
     for item in display_list.items.iter() {
         // Flush the deferred text before (a) the `Text` items that mark where
@@ -362,19 +415,33 @@ pub fn display_list_to_printpdf_ops_with_margins<T: ParsedFontTrait + 'static>(
                 | DisplayListItem::PopClip
                 | DisplayListItem::PushOpacity { .. }
                 | DisplayListItem::PopOpacity
+                | DisplayListItem::PushTextShadow { .. }
+                | DisplayListItem::PopTextShadow
         ) {
-            if let Some((layout, bounds, color)) = pending_text.take() {
-                render_unified_layout_with_margins(
-                    &mut ops, layout, &bounds, color, &transform, font_manager, bridge_res,
+            if let Some((layout, bounds, color, shadow)) = pending_text.take() {
+                render_text_with_shadow(
+                    &mut ops, layout, &bounds, color, shadow.as_ref(), &transform, font_manager, bridge_res,
                 );
             }
+        }
+
+        match item {
+            DisplayListItem::PushTextShadow { shadow } => {
+                text_shadows.push(*shadow);
+                continue;
+            }
+            DisplayListItem::PopTextShadow => {
+                text_shadows.pop();
+                continue;
+            }
+            _ => {}
         }
 
         if let DisplayListItem::TextLayout { layout, bounds, color, .. } = item {
             if let Some(unified_layout) =
                 layout.downcast_ref::<azul_layout::text3::cache::UnifiedLayout>()
             {
-                pending_text = Some((unified_layout, *bounds.inner(), *color));
+                pending_text = Some((unified_layout, *bounds.inner(), *color, text_shadows.last().copied()));
                 current_text_layout = Some((unified_layout, *bounds.inner()));
             }
             continue;
@@ -394,8 +461,8 @@ pub fn display_list_to_printpdf_ops_with_margins<T: ParsedFontTrait + 'static>(
     }
 
     // Trailing TextLayout without any following Text item / scope change.
-    if let Some((layout, bounds, color)) = pending_text.take() {
-        render_unified_layout_with_margins(&mut ops, layout, &bounds, color, &transform, font_manager, bridge_res);
+    if let Some((layout, bounds, color, shadow)) = pending_text.take() {
+        render_text_with_shadow(&mut ops, layout, &bounds, color, shadow.as_ref(), &transform, font_manager, bridge_res);
     }
 
     Ok(ops)
