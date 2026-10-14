@@ -116,6 +116,29 @@ pub fn resolve_html_images(images: &BTreeMap<String, Vec<u8>>) -> ResolvedImages
     out
 }
 
+/// An [`azul_core::resources::ImageCache`] naming each embedded image's real
+/// size, keyed by its `src`.
+///
+/// The layout engine receives an `<img>` as a placeholder tagged with its `src`
+/// and 0x0 in size; the pixels are only embedded later, by this bridge. The
+/// cache is how layout learns the size it needs for the intrinsic aspect ratio
+/// (`object-fit`). The entries are size-only placeholders: no pixel data.
+pub fn image_cache_for(resolved: &ResolvedImages) -> azul_core::resources::ImageCache {
+    let mut cache = azul_core::resources::ImageCache::new();
+    for (key, (_, raw)) in resolved.iter() {
+        cache.add_css_image_id(
+            key.as_str().into(),
+            azul_core::resources::ImageRef::null_image(
+                raw.width,
+                raw.height,
+                azul_core::resources::RawImageFormat::RGBA8,
+                key.as_bytes().to_vec(),
+            ),
+        );
+    }
+    cache
+}
+
 use super::border::{
     BorderConfig, extract_border_widths, extract_border_colors, 
     extract_border_styles, extract_border_radii, render_border,
@@ -1357,6 +1380,27 @@ mod tests {
     /// The real cat.jpg used by the `html_image` example, decoded and placed in a
     /// display-list Image item, must produce an `Op::UseXobject` referencing the
     /// deterministic id and scaled to the item bounds.
+    /// Layout only sees a tagged 0x0 placeholder for `<img>`; the cache hands it
+    /// the real decoded size, keyed by `src`.
+    #[cfg(all(feature = "images", feature = "jpeg"))]
+    #[test]
+    fn image_cache_names_each_images_decoded_size() {
+        let cat_jpg: &[u8] = include_bytes!("../../examples/assets/img/cat.jpg");
+        let resolved = resolve_html_images(
+            &[("cat.jpg".to_string(), cat_jpg.to_vec())]
+                .into_iter()
+                .collect(),
+        );
+        let (_, raw) = resolved.get("cat.jpg").expect("cat.jpg decoded");
+        let cache = image_cache_for(&resolved);
+        let size = cache
+            .get_css_image_id(&"cat.jpg".into())
+            .expect("cached under its src")
+            .get_size();
+        assert_eq!((size.width, size.height), (raw.width as f32, raw.height as f32));
+        assert!(cache.get_css_image_id(&"missing.jpg".into()).is_none());
+    }
+
     #[cfg(all(feature = "images", feature = "jpeg"))]
     #[test]
     fn image_item_emits_use_xobject() {

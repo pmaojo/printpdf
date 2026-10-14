@@ -586,6 +586,11 @@ pub fn xml_to_pdf_pages(
     // This uses FakePageConfig for programmatic control over headers/footers.
     let page_config = build_page_config(options);
 
+    // Decode embedded `<img>` bytes up front: layout needs each image's real
+    // size (it only sees a tagged 0x0 placeholder), and the bridge needs the
+    // pixels afterwards.
+    let resolved_images = bridge::resolve_html_images(&options.images);
+    let image_cache = bridge::image_cache_for(&resolved_images);
     let display_lists = match layout_document_paged_v2(
         &mut layout_cache,
         &mut text_cache,
@@ -601,7 +606,7 @@ pub fn xml_to_pdf_pages(
         DomId::ROOT_ID,
         font_loader,
         page_config,
-        &azul_core::resources::ImageCache::default(), // No image cache for PDF
+        &image_cache,
         azul_core::task::GetSystemTimeCallback { cb: azul_core::task::get_system_time_libstd },
         false, // print_timing
     ) {
@@ -619,7 +624,6 @@ pub fn xml_to_pdf_pages(
     // Decode any embedded `<img>` bytes once, keyed by `src`. Each decoded image
     // gets a deterministic XObject id so the bridge's `UseXobject` ops and the
     // document-side XObject registration agree.
-    let resolved_images = bridge::resolve_html_images(&options.images);
     // Resources synthesized by the bridge (alpha/opacity ExtGStates, gradient
     // shadings, shadow XObjects), accumulated across pages and registered by
     // the caller (`from_html*`) via `BridgeResources::register_into`.
@@ -874,6 +878,11 @@ pub fn xml_to_pdf_pages_debug(
     let page_config = build_page_config(options);
 
     eprintln!("[DEBUG xml_to_pdf_pages_debug] Starting paged layout...");
+    // Decode embedded `<img>` bytes up front: layout needs each image's real
+    // size (it only sees a tagged 0x0 placeholder), and the bridge needs the
+    // pixels afterwards.
+    let resolved_images = bridge::resolve_html_images(&options.images);
+    let image_cache = bridge::image_cache_for(&resolved_images);
     let display_lists = match layout_document_paged_v2(
         &mut layout_cache,
         &mut text_cache,
@@ -889,7 +898,7 @@ pub fn xml_to_pdf_pages_debug(
         DomId::ROOT_ID,
         font_loader,
         page_config,
-        &azul_core::resources::ImageCache::default(),
+        &image_cache,
         azul_core::task::GetSystemTimeCallback { cb: azul_core::task::get_system_time_libstd },
         false, // print_timing
     ) {
@@ -947,7 +956,6 @@ pub fn xml_to_pdf_pages_debug(
 
     // Decode embedded `<img>` bytes once (same deterministic ids as the
     // document-side XObject registration).
-    let resolved_images = bridge::resolve_html_images(&options.images);
     let mut bridge_res = bridge::BridgeResources::default();
 
     // Convert each DisplayList to a PDF page
