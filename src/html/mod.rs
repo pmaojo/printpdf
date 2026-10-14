@@ -456,6 +456,83 @@ fn build_page_config(options: &XmlRenderOptions) -> FakePageConfig {
     page_config
 }
 
+/// Adds the decoded pixel size of each embedded `<img src="KEY">` as `width` /
+/// `height` attributes (when the tag sets neither), so the layout engine knows
+/// the image's intrinsic size.
+///
+/// Without it an `<img>` reaches layout as a 0x0 placeholder: an image with no
+/// CSS size has no box to draw into, `height:auto` has nothing to derive from,
+/// and `object-fit` has no aspect ratio to fit. In HTML these attributes are
+/// presentational hints that any CSS `width`/`height` overrides, which is how
+/// azul treats them too.
+fn inject_img_intrinsic_sizes(html: &str, images: &BTreeMap<String, Vec<u8>>) -> String {
+    if images.is_empty() || !html.contains("<img") {
+        return html.to_string();
+    }
+    let mut sizes: BTreeMap<&str, Option<(usize, usize)>> = BTreeMap::new();
+    let mut out = String::with_capacity(html.len() + 64);
+    let mut rest = html;
+    while let Some(start) = rest.find("<img") {
+        let (before, tag_and_rest) = rest.split_at(start);
+        out.push_str(before);
+        // `<img` must be followed by whitespace, `/` or `>` (not `<imgfoo`).
+        let after_name = &tag_and_rest[4..];
+        let boundary = after_name
+            .chars()
+            .next()
+            .is_none_or(|c| c.is_whitespace() || c == '/' || c == '>');
+        let Some(end) = tag_and_rest.find('>').filter(|_| boundary) else {
+            out.push_str("<img");
+            rest = after_name;
+            continue;
+        };
+        let tag = &tag_and_rest[..end];
+        let has_attr = |name: &str| {
+            tag.contains(&format!(" {name}=\"")) || tag.contains(&format!(" {name}='"))
+        };
+        let src = attr_value(tag, "src");
+        let dims = match src {
+            Some(key) if !has_attr("width") && !has_attr("height") => {
+                images.get_key_value(key).and_then(|(k, bytes)| {
+                    *sizes.entry(k.as_str()).or_insert_with(|| {
+                        let mut warnings = Vec::new();
+                        crate::RawImage::decode_from_bytes(bytes, &mut warnings)
+                            .ok()
+                            .map(|raw| (raw.width, raw.height))
+                    })
+                })
+            }
+            _ => None,
+        };
+        match dims {
+            Some((w, h)) => {
+                out.push_str(tag.trim_end_matches('/').trim_end());
+                out.push_str(&format!(" width=\"{w}\" height=\"{h}\""));
+                if tag.trim_end().ends_with('/') {
+                    out.push_str(" /");
+                }
+            }
+            None => out.push_str(tag),
+        }
+        rest = &tag_and_rest[end..];
+    }
+    out.push_str(rest);
+    out
+}
+
+/// The value of attribute `name` inside an open tag's text (quoted with `"`
+/// or `'`).
+fn attr_value<'a>(tag: &'a str, name: &str) -> Option<&'a str> {
+    for quote in ['"', '\''] {
+        let needle = format!(" {name}={quote}");
+        if let Some(i) = tag.find(&needle) {
+            let value = &tag[i + needle.len()..];
+            return value.find(quote).map(|e| &value[..e]);
+        }
+    }
+    None
+}
+
 /// Convert XML/HTML content to PDF pages, returning pages, the font map, and the
 /// decoded `<img>` resources.
 ///
@@ -470,7 +547,8 @@ pub fn xml_to_pdf_pages(
 ) -> Result<(Vec<PdfPage>, BTreeMap<FontHash, ParsedFont>, bridge::ResolvedImages, bridge::BridgeResources), Vec<PdfWarnMsg>> {
     let mut warnings = Vec::new();
     // Type-safe preprocessing: RawHtml -> PreprocessedHtml
-    let preprocessed = RawHtml::new(xml).preprocess();
+    let with_sizes = inject_img_intrinsic_sizes(xml, &options.images);
+    let preprocessed = RawHtml::new(with_sizes).preprocess();
     let inlined_xml = preprocessed.as_str();
 
     // Parse XML to XmlNode tree
@@ -753,7 +831,8 @@ pub fn xml_to_pdf_pages_debug(
 
     // Type-safe preprocessing: RawHtml -> PreprocessedHtml
     eprintln!("[DEBUG xml_to_pdf_pages_debug] Preprocessing HTML...");
-    let preprocessed = RawHtml::new(xml).preprocess();
+    let with_sizes = inject_img_intrinsic_sizes(xml, &options.images);
+    let preprocessed = RawHtml::new(with_sizes).preprocess();
     let inlined_xml = preprocessed.as_str();
     eprintln!("[DEBUG xml_to_pdf_pages_debug] Preprocessed, length={}", inlined_xml.len());
 
