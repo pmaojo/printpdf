@@ -41,3 +41,4 @@ fn a_blurred_text_shadow_spreads_several_translucent_copies() {
 fn text_without_a_shadow_is_untouched() {
     assert_eq!(show_text_count("color: #112233;"), show_text_count(""));
 }
+
