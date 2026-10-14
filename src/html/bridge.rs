@@ -244,6 +244,37 @@ fn normalize_gradient_stops(
         .collect()
 }
 
+/// The PDF `cm` matrix for a CSS transform reference frame.
+///
+/// `m` is azul's row-major 4x4 (a point is a row vector: `x' = x*m00 + y*m10 +
+/// m30`), relative to the frame's own top-left `origin` (layout px, y down)
+/// with `transform-origin` already folded in. The result conjugates that map
+/// by the layout -> PDF mapping (px -> pt, y flip, page margins), so the
+/// transform applies to content already placed in PDF space: `F ∘ A ∘ F⁻¹`.
+fn reference_frame_matrix(
+    m: &[[f32; 4]; 4],
+    origin: (f32, f32),
+    page_height: f32,
+    margin_left: f32,
+    margin_top: f32,
+) -> [f32; 6] {
+    let (a, b, c, d) = (m[0][0], m[0][1], m[1][0], m[1][1]);
+    // layout-space affine about the frame origin:
+    // x' = a x + c y + e, y' = b x + d y + f
+    let e = origin.0 + m[3][0] - a * origin.0 - c * origin.1;
+    let f = origin.1 + m[3][1] - b * origin.0 - d * origin.1;
+    let s = CSS_PX_TO_PT;
+    let hm = page_height - margin_top;
+    [
+        a,
+        -b,
+        -c,
+        d,
+        margin_left * (1.0 - a) + c * hm + s * e,
+        hm * (1.0 - d) + b * margin_left - s * f,
+    ]
+}
+
 /// Convert a display list directly to printpdf Ops with margin support.
 /// 
 /// This version applies margins during coordinate transformation:
@@ -301,6 +332,8 @@ pub fn display_list_to_printpdf_ops_with_margins<T: ParsedFontTrait + 'static>(
                 | DisplayListItem::PopClip
                 | DisplayListItem::PushOpacity { .. }
                 | DisplayListItem::PopOpacity
+                | DisplayListItem::PushReferenceFrame { .. }
+                | DisplayListItem::PopReferenceFrame
         ) {
             if let Some((layout, bounds, color)) = pending_text.take() {
                 render_unified_layout_with_margins(
@@ -896,6 +929,28 @@ fn convert_display_list_item_with_margins<'a, T: ParsedFontTrait + 'static>(
         DisplayListItem::PopClip => {
             ops.push(Op::RestoreGraphicsState);
         }
+
+        // CSS `transform`: azul wraps the element in a reference frame whose
+        // matrix is relative to the frame's own top-left (bounds.origin), with
+        // transform-origin already folded in. Map it into PDF space.
+        DisplayListItem::PushReferenceFrame { initial_transform, bounds, .. } => {
+            ops.push(Op::SaveGraphicsState);
+            let o = bounds.inner().origin;
+            let cm = reference_frame_matrix(
+                &initial_transform.m,
+                (o.x, o.y),
+                page_height,
+                margin_left,
+                margin_top,
+            );
+            ops.push(Op::SetTransformationMatrix {
+                matrix: crate::matrix::CurTransMat::Raw(cm),
+            });
+        }
+        DisplayListItem::PopReferenceFrame => {
+            ops.push(Op::RestoreGraphicsState);
+        }
+
 
         _ => {
             // Remaining items not yet wired for PDF:
@@ -1561,5 +1616,71 @@ mod tests {
         assert!(has_filter, "image XObject should be a DCTDecode (JPEG) stream");
         let has_width = contains(b"/Width") && contains(b"/Height");
         assert!(has_width, "serialized PDF must declare image width/height");
+    }
+}
+
+#[cfg(test)]
+mod reference_frame_tests {
+    use super::reference_frame_matrix;
+
+    const S: f32 = 72.0 / 96.0;
+
+    /// layout px (y down) -> PDF pt, for page height `h` and margins.
+    fn to_pdf(p: (f32, f32), h: f32, ml: f32, mt: f32) -> (f32, f32) {
+        (p.0 * S + ml, h - p.1 * S - mt)
+    }
+
+    fn apply(cm: [f32; 6], q: (f32, f32)) -> (f32, f32) {
+        (cm[0] * q.0 + cm[2] * q.1 + cm[4], cm[1] * q.0 + cm[3] * q.1 + cm[5])
+    }
+
+    /// row-major 4x4 for the 2D affine `x' = a x + c y + tx, y' = b x + d y + ty`.
+    fn m(a: f32, b: f32, c: f32, d: f32, tx: f32, ty: f32) -> [[f32; 4]; 4] {
+        [
+            [a, b, 0.0, 0.0],
+            [c, d, 0.0, 0.0],
+            [0.0, 0.0, 1.0, 0.0],
+            [tx, ty, 0.0, 1.0],
+        ]
+    }
+
+    #[test]
+    fn identity_is_the_identity() {
+        let cm = reference_frame_matrix(&m(1.0, 0.0, 0.0, 1.0, 0.0, 0.0), (40.0, 60.0), 842.0, 28.0, 28.0);
+        for (got, want) in cm.iter().zip([1.0, 0.0, 0.0, 1.0, 0.0, 0.0]) {
+            assert!((got - want).abs() < 1e-3, "{cm:?}");
+        }
+    }
+
+    /// For any frame, mapping a layout point to PDF space and then through the
+    /// matrix equals mapping it through the layout-space transform first.
+    #[test]
+    fn it_conjugates_the_layout_transform_by_the_pdf_mapping() {
+        let (h, ml, mt) = (842.0, 28.0, 36.0);
+        let origin = (120.0f32, 200.0f32);
+        let (sin, cos) = (30f32.to_radians().sin(), 30f32.to_radians().cos());
+        // rotate(30deg) + scale(1.5, 0.8) + translate(14, -9) about the frame's top-left
+        let (a, b, c, d) = (cos * 1.5, sin * 1.5, -sin * 0.8, cos * 0.8);
+        let t = m(a, b, c, d, 14.0, -9.0);
+        let cm = reference_frame_matrix(&t, origin, h, ml, mt);
+        for p in [(120.0f32, 200.0f32), (260.0, 310.0), (95.0, 410.0)] {
+            // layout-space: local = p - origin; p' = origin + T(local)
+            let local = (p.0 - origin.0, p.1 - origin.1);
+            let moved = (
+                origin.0 + a * local.0 + c * local.1 + 14.0,
+                origin.1 + b * local.0 + d * local.1 - 9.0,
+            );
+            let want = to_pdf(moved, h, ml, mt);
+            let got = apply(cm, to_pdf(p, h, ml, mt));
+            assert!((got.0 - want.0).abs() < 1e-2 && (got.1 - want.1).abs() < 1e-2, "{p:?}: {got:?} vs {want:?}");
+        }
+    }
+
+    #[test]
+    fn a_translation_moves_right_and_down_on_the_page() {
+        // translate(16px, 8px): +12pt in x, and DOWN the page = -6pt in PDF y.
+        let cm = reference_frame_matrix(&m(1.0, 0.0, 0.0, 1.0, 16.0, 8.0), (0.0, 0.0), 842.0, 0.0, 0.0);
+        let q = apply(cm, (100.0, 500.0));
+        assert!((q.0 - 112.0).abs() < 1e-3 && (q.1 - 494.0).abs() < 1e-3, "{q:?}");
     }
 }
