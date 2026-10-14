@@ -59,18 +59,47 @@ pub struct BridgeResources {
     pub xobjects: Vec<(XObjectId, XObject)>,
 }
 
+/// FNV-1a over `bytes`, seeded. Used only to name resources, so a small,
+/// fixed, dependency-free hash is all that is needed (not `DefaultHasher`,
+/// whose algorithm is not guaranteed stable across Rust releases).
+fn fnv1a(seed: u64, bytes: &[u8]) -> u64 {
+    let mut h = seed ^ 0xcbf2_9ce4_8422_2325;
+    for b in bytes {
+        h ^= u64::from(*b);
+        h = h.wrapping_mul(0x0000_0100_0000_01b3);
+    }
+    h
+}
+
+/// A 32-character resource name derived from `content`, so the same content
+/// always gets the same name. Resource names used to be random, which made
+/// two renders of one document differ byte-for-byte, and let identical
+/// states pile up as duplicates.
+fn content_name(prefix: &str, content: &str) -> String {
+    let a = fnv1a(1, content.as_bytes());
+    let b = fnv1a(2, content.as_bytes());
+    format!("{prefix}{a:016x}{b:016x}")[..32].to_string()
+}
+
 impl BridgeResources {
-    /// Allocate an `ExtGState`, record it, and return its id (for `LoadGraphicsState`).
+    /// Record an `ExtGState` and return its id (for `LoadGraphicsState`).
+    /// The id is derived from the state's content, and an identical state is
+    /// recorded once.
     fn add_extgstate(&mut self, gs: ExtendedGraphicsState) -> ExtendedGraphicsStateId {
-        let id = ExtendedGraphicsStateId::new();
-        self.extgstates.push((id.clone(), gs));
+        let id = ExtendedGraphicsStateId(content_name("G", &format!("{gs:?}")));
+        if !self.extgstates.iter().any(|(existing, _)| *existing == id) {
+            self.extgstates.push((id.clone(), gs));
+        }
         id
     }
 
-    /// Allocate a shading, record it, and return its id (for `PaintShading`).
+    /// Record a shading and return its id (for `PaintShading`), derived from
+    /// its content like [`Self::add_extgstate`].
     fn add_shading(&mut self, shading: Shading) -> ShadingId {
-        let id = ShadingId::new();
-        self.shadings.push((id.clone(), shading));
+        let id = ShadingId(content_name("S", &format!("{shading:?}")));
+        if !self.shadings.iter().any(|(existing, _)| *existing == id) {
+            self.shadings.push((id.clone(), shading));
+        }
         id
     }
 
