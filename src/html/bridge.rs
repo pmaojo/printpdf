@@ -897,6 +897,64 @@ fn convert_display_list_item_with_margins<'a, T: ParsedFontTrait + 'static>(
             ops.push(Op::RestoreGraphicsState);
         }
 
+        // Paint outset box shadows (the layout engine emits them; they were dropped
+        // here). A blur is approximated by stacked translucent rects
+        // whose cumulative alpha ramps linearly from the outer to the inner edge.
+        DisplayListItem::BoxShadow { bounds, shadow, border_radius } => {
+            use azul_css::props::style::box_shadow::BoxShadowClipMode;
+            if !matches!(shadow.clip_mode, BoxShadowClipMode::Outset) {
+                return;
+            }
+            let px = |v: &azul_css::props::basic::pixel::PixelValueNoPercent| {
+                v.to_pixels_internal(16.0, 16.0)
+            };
+            let (dx, dy) = (px(&shadow.offset_x), px(&shadow.offset_y));
+            let blur = px(&shadow.blur_radius).max(0.0);
+            let spread = px(&shadow.spread_radius);
+            let base = bounds.inner();
+            let layers: usize = if blur < 0.5 { 1 } else { ((blur.ceil() as usize) * 2).clamp(2, 12) };
+            let target = shadow.color.a as f32 / 255.0;
+            let mut cumulative = 0.0f32;
+            for k in 0..layers {
+                let expand = if layers == 1 {
+                    spread
+                } else {
+                    spread + blur / 2.0 - blur * (k as f32) / ((layers - 1) as f32)
+                };
+                let w = base.size.width + 2.0 * expand;
+                let h = base.size.height + 2.0 * expand;
+                let want = target * ((k + 1) as f32) / (layers as f32);
+                let layer_alpha = if cumulative >= 1.0 { 0.0 } else { (want - cumulative) / (1.0 - cumulative) };
+                cumulative = want;
+                if w <= 0.0 || h <= 0.0 || layer_alpha <= 0.0 {
+                    continue;
+                }
+                let grow = |r: f32| if r > 0.0 { (r + expand).max(0.0) } else { 0.0 };
+                let mut color = shadow.color;
+                color.a = (layer_alpha.clamp(0.0, 1.0) * 255.0).round() as u8;
+                let rect = DisplayListItem::Rect {
+                    bounds: LogicalRect::new(
+                        LogicalPosition::new(base.origin.x + dx - expand, base.origin.y + dy - expand),
+                        LogicalSize::new(w, h),
+                    )
+                    .into(),
+                    color,
+                    border_radius: azul_layout::solver3::display_list::BorderRadius {
+                        top_left: grow(border_radius.top_left),
+                        top_right: grow(border_radius.top_right),
+                        bottom_left: grow(border_radius.bottom_left),
+                        bottom_right: grow(border_radius.bottom_right),
+                    },
+                };
+                let mut no_text = None;
+                convert_display_list_item_with_margins(
+                    ops, &rect, page_height, margin_left, margin_top,
+                    &mut no_text, _font_manager, images, bridge_res,
+                );
+            }
+        }
+
+
         _ => {
             // Remaining items not yet wired for PDF:
             //  - PushImageMaskClip/PopImageMaskClip: alpha-mask clipping (would
