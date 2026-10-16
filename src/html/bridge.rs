@@ -676,6 +676,28 @@ impl CoordTransform {
     }
 }
 
+/// Where on the PDF page a display-list box lands: `[x, y, width, height]`
+/// in pt, `(x, y)` its bottom-left corner -- exactly the rectangle a
+/// `DisplayListItem::Rect` of these bounds would fill (no border radius).
+/// `None` for an empty box, which a `Rect` does not paint either.
+pub fn box_to_pdf_pt(
+    bounds: &LogicalRect,
+    page_height: f32,
+    margin_left: f32,
+    margin_top: f32,
+) -> Option<[f32; 4]> {
+    if bounds.size.width == 0.0 || bounds.size.height == 0.0 {
+        return None;
+    }
+    let transform = CoordTransform::new(page_height, margin_left, margin_top);
+    Some([
+        transform.x(bounds.origin.x),
+        transform.rect_y(bounds.origin.y, bounds.size.height),
+        transform.dim(bounds.size.width),
+        transform.dim(bounds.size.height),
+    ])
+}
+
 fn convert_display_list_item_with_margins<'a, T: ParsedFontTrait + 'static>(
     ops: &mut Vec<Op>,
     item: &'a DisplayListItem,

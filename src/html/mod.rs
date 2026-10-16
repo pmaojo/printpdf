@@ -12,6 +12,7 @@ use std::collections::HashMap;
 
 use azul_core::{
     dom::DomId,
+    id::NodeId,
     geom::{LogicalSize, LogicalRect, LogicalPosition},
     resources::RendererResources,
     xml::{str_to_dom, ComponentDef},
@@ -131,6 +132,11 @@ pub struct XmlRenderOptions {
     /// Form). An ID present in `images` too is taken from `images`.
     #[serde(default)]
     pub image_placeholders: BTreeMap<String, (u32, u32)>,
+    /// Report where layout put every element carrying a class that starts
+    /// with this prefix (see [`add_xml_to_document_tracked`]). `None`, the
+    /// default, tracks nothing.
+    #[serde(default)]
+    pub track_class_prefix: Option<String>,
     /// Page width in millimeters
     #[serde(default = "default_page_width")]
     pub page_width: Mm,
@@ -170,6 +176,7 @@ impl Default for XmlRenderOptions {
             images: BTreeMap::new(),
             fonts: BTreeMap::new(),
             image_placeholders: BTreeMap::new(),
+            track_class_prefix: None,
             page_width: default_page_width(),
             page_height: default_page_height(),
             margins: PageMargins::default(),
@@ -477,6 +484,91 @@ pub fn xml_to_pdf_pages(
     xml: &str,
     options: &XmlRenderOptions,
 ) -> Result<(Vec<PdfPage>, BTreeMap<FontHash, ParsedFont>, bridge::ResolvedImages, bridge::BridgeResources), Vec<PdfWarnMsg>> {
+    xml_to_pdf_pages_tracked(xml, options)
+        .map(|(pages, fonts, images, bridge_res, _)| (pages, fonts, images, bridge_res))
+}
+
+/// One box layout gave a tracked element (see
+/// [`XmlRenderOptions::track_class_prefix`]): the page it is on (an index into
+/// the pages produced) and its rectangle in PDF pt, `(x, y)` its bottom-left
+/// corner.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct TrackedBox {
+    pub page: usize,
+    pub x: f32,
+    pub y: f32,
+    pub width: f32,
+    pub height: f32,
+}
+
+/// Tracked boxes by class, in display-list order.
+pub type TrackedBoxes = BTreeMap<String, Vec<TrackedBox>>;
+
+/// The DOM node a hit-test tag names, if any: a text run's cursor tag carries
+/// its node index, a DOM-node tag the node's `TagId`.
+fn hit_test_node(dom: &azul_core::styled_dom::StyledDom, tag: (u64, u16)) -> Option<NodeId> {
+    use azul_core::hit_test::{TAG_TYPE_CURSOR, TAG_TYPE_DOM_NODE};
+    let (value, kind) = tag;
+    if kind & 0xFF00 == TAG_TYPE_CURSOR {
+        return Some(NodeId::new((value & 0xFFFF_FFFF) as usize));
+    }
+    if kind == TAG_TYPE_DOM_NODE {
+        return dom
+            .tag_ids_to_node_ids
+            .as_ref()
+            .iter()
+            .find(|m| m.tag_id.inner == value)
+            .and_then(|m| m.node_id.into_crate_internal());
+    }
+    None
+}
+
+/// The tracked class of `node` or of its nearest ancestor that has one.
+fn tracked_class(
+    dom: &azul_core::styled_dom::StyledDom,
+    prefix: &str,
+    node: NodeId,
+    memo: &mut BTreeMap<usize, Option<String>>,
+) -> Option<String> {
+    let hierarchy = dom.node_hierarchy.as_container();
+    let data = dom.node_data.as_container();
+    let mut walked = Vec::new();
+    let mut current = Some(node);
+    let found = loop {
+        let Some(id) = current else { break None };
+        if let Some(known) = memo.get(&id.index()) {
+            break known.clone();
+        }
+        walked.push(id.index());
+        let Some(node_data) = data.get(id) else { break None };
+        let own = node_data.attributes().as_ref().iter().find_map(|attr| match attr {
+            azul_core::dom::AttributeType::Class(class) if class.as_str().starts_with(prefix) => {
+                Some(class.as_str().to_string())
+            }
+            _ => None,
+        });
+        if own.is_some() {
+            break own;
+        }
+        current = hierarchy.get(id).and_then(|h| h.parent_id());
+    };
+    for index in walked {
+        memo.insert(index, found.clone());
+    }
+    found
+}
+
+/// Like [`xml_to_pdf_pages`], plus the boxes of every element carrying a class
+/// that starts with [`XmlRenderOptions::track_class_prefix`]: each hit-test
+/// area layout produced for it or for anything inside it -- a text run, the
+/// border box of an interactive (for example `cursor`-styled) element -- on
+/// the page it landed, placed exactly as a filled rectangle of the same bounds
+/// would be. Found in the same pass as the pages, so finding where something
+/// landed costs no second layout.
+pub fn xml_to_pdf_pages_tracked(
+    xml: &str,
+    options: &XmlRenderOptions,
+) -> Result<(Vec<PdfPage>, BTreeMap<FontHash, ParsedFont>, bridge::ResolvedImages, bridge::BridgeResources, TrackedBoxes), Vec<PdfWarnMsg>> {
     let mut warnings = Vec::new();
     // Type-safe preprocessing: RawHtml -> PreprocessedHtml
     let preprocessed = RawHtml::new(xml).preprocess();
@@ -647,6 +739,9 @@ pub fn xml_to_pdf_pages(
     // Full page size for PDF coordinate transformation
     let full_page_size = LogicalSize::new(page_width_pt, page_height_pt);
 
+    let mut tracked = TrackedBoxes::new();
+    let mut tracked_memo = BTreeMap::new();
+
     for display_list in display_lists.iter() {
         // Skip pages that have no meaningful content (only plain background
         // fills). A page is "real" if it has text, an image, a gradient or a
@@ -718,6 +813,29 @@ pub fn xml_to_pdf_pages(
             }
         }
         
+        if let Some(prefix) = options.track_class_prefix.as_deref() {
+            use azul_layout::solver3::display_list::DisplayListItem;
+            for item in display_list.items.iter() {
+                let DisplayListItem::HitTestArea { bounds, tag } = item else { continue };
+                let Some(node) = hit_test_node(&styled_dom, *tag) else { continue };
+                let Some(class) = tracked_class(&styled_dom, prefix, node, &mut tracked_memo) else {
+                    continue;
+                };
+                let Some([x, y, width, height]) =
+                    bridge::box_to_pdf_pt(bounds.inner(), page_height_pt, margin_left_pt, margin_top_pt)
+                else {
+                    continue;
+                };
+                tracked.entry(class).or_default().push(TrackedBox {
+                    page: pages.len(),
+                    x,
+                    y,
+                    width,
+                    height,
+                });
+            }
+        }
+
         // Create a page for this display list (using full page dimensions)
         let page = PdfPage::new(options.page_width, options.page_height, pdf_ops);
         pages.push(page);
@@ -739,7 +857,7 @@ pub fn xml_to_pdf_pages(
         .map(|(hash, font)| (hash, ParsedFont::from_azul(font)))
         .collect();
 
-    Ok((pages, font_data_map, resolved_images, bridge_res))
+    Ok((pages, font_data_map, resolved_images, bridge_res, tracked))
 }
 
 /// Debug information from PDF generation
@@ -1102,8 +1220,20 @@ pub fn add_xml_to_document(
     xml: &str,
     options: &XmlRenderOptions,
 ) -> Result<(), Vec<PdfWarnMsg>> {
-    match xml_to_pdf_pages(xml, options) {
-        Ok((pages, font_data, images, bridge_res)) => {
+    add_xml_to_document_tracked(document, xml, options).map(|_| ())
+}
+
+/// Like [`add_xml_to_document`], returning the boxes of the elements
+/// [`XmlRenderOptions::track_class_prefix`] asks for (see
+/// [`xml_to_pdf_pages_tracked`]), with page indexes counted from the first
+/// page this call adds.
+pub fn add_xml_to_document_tracked(
+    document: &mut PdfDocument,
+    xml: &str,
+    options: &XmlRenderOptions,
+) -> Result<TrackedBoxes, Vec<PdfWarnMsg>> {
+    match xml_to_pdf_pages_tracked(xml, options) {
+        Ok((pages, font_data, images, bridge_res, tracked)) => {
             // Register fonts in the document
             for (font_hash, parsed_font) in font_data.into_iter() {
                 let font_id = crate::FontId(format!("F{}", font_hash.font_hash));
@@ -1115,7 +1245,7 @@ pub fn add_xml_to_document(
             bridge::register_images(&mut document.resources, images, &options.image_placeholders);
             bridge_res.register_into(&mut document.resources);
             document.pages.extend(pages);
-            Ok(())
+            Ok(tracked)
         }
         Err(warnings) => Err(warnings),
     }
