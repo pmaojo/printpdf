@@ -155,6 +155,76 @@ pub fn resolve_html_images(images: &BTreeMap<String, Vec<u8>>) -> ResolvedImages
     out
 }
 
+/// Like [`resolve_html_images`], plus one size-only entry per
+/// `placeholders` ID (width, height in px) that `images` does not already
+/// provide. A size-only entry carries no pixels: the bridge reads only an
+/// image's size, and [`register_images`] gives the document a stand-in for it.
+pub fn resolve_html_images_with_placeholders(
+    images: &BTreeMap<String, Vec<u8>>,
+    placeholders: &BTreeMap<String, (u32, u32)>,
+) -> ResolvedImages {
+    let mut out = resolve_html_images(images);
+    for (key, &(width, height)) in placeholders.iter() {
+        if width == 0 || height == 0 || out.contains_key(key) {
+            continue;
+        }
+        let size_only = RawImage {
+            pixels: crate::RawImageData::U8(Vec::new()),
+            width: width as usize,
+            height: height as usize,
+            data_format: crate::RawImageFormat::R8,
+            tag: Vec::new(),
+        };
+        out.insert(key.clone(), (image_xobject_id(key), size_only));
+    }
+    out
+}
+
+/// Registers resolved `<img>` images on `resources` under their deterministic
+/// ids. A size-only entry (an ID in `placeholders` that was not decoded from
+/// bytes) becomes a one-pixel image XObject that declares the placeholder's
+/// size, so `Do` places it in exactly the box a real image of that size would
+/// fill; whoever asked for the placeholder replaces the object after saving.
+pub fn register_images(
+    resources: &mut crate::PdfResources,
+    images: ResolvedImages,
+    placeholders: &BTreeMap<String, (u32, u32)>,
+) {
+    for (src, (xobject_id, raw_image)) in images.into_iter() {
+        let size_only = placeholders.contains_key(&src)
+            && matches!(&raw_image.pixels, crate::RawImageData::U8(p) if p.is_empty());
+        let xobject = if size_only {
+            crate::XObject::External(placeholder_xobject(raw_image.width, raw_image.height))
+        } else {
+            crate::XObject::Image(raw_image)
+        };
+        resources.xobjects.map.insert(xobject_id, xobject);
+    }
+}
+
+/// A valid one-pixel greyscale image that lays out as `width` x `height` px.
+fn placeholder_xobject(width: usize, height: usize) -> crate::xobject::ExternalXObject {
+    use crate::xobject::{DictItem, ExternalStream, ExternalXObject};
+    let dict = BTreeMap::from([
+        ("Type".to_string(), DictItem::Name(b"XObject".to_vec())),
+        ("Subtype".to_string(), DictItem::Name(b"Image".to_vec())),
+        ("Width".to_string(), DictItem::Int(1)),
+        ("Height".to_string(), DictItem::Int(1)),
+        ("ColorSpace".to_string(), DictItem::Name(b"DeviceGray".to_vec())),
+        ("BitsPerComponent".to_string(), DictItem::Int(8)),
+    ]);
+    ExternalXObject {
+        stream: ExternalStream {
+            dict,
+            content: vec![0],
+            compress: false,
+        },
+        width: Some(crate::Px(width)),
+        height: Some(crate::Px(height)),
+        dpi: None,
+    }
+}
+
 /// An [`azul_core::resources::ImageCache`] naming each embedded image's real
 /// size, keyed by its `src`.
 ///

@@ -492,12 +492,11 @@ impl PdfDocument {
                 }
                 // Register `<img>` images as PDF Image XObjects (ids match the
                 // bridge's `UseXobject` ops).
-                for (_src, (xobject_id, raw_image)) in images.into_iter() {
-                    pdf.resources
-                        .xobjects
-                        .map
-                        .insert(xobject_id, crate::XObject::Image(raw_image));
-                }
+                crate::html::bridge::register_images(
+                    &mut pdf.resources,
+                    images,
+                    &xml_options.image_placeholders,
+                );
 
                 // Register bridge-synthesized resources (alpha/opacity ExtGStates,
                 // gradient shadings, shadow XObjects) referenced by the page ops.
@@ -591,14 +590,14 @@ impl PdfDocument {
                 // Register `<img>` images as PDF Image XObjects (ids match the
                 // bridge's `UseXobject` ops). Re-derived from the same bytes so
                 // it stays in sync with `xml_to_pdf_pages_debug`.
-                for (_src, (xobject_id, raw_image)) in
-                    crate::html::bridge::resolve_html_images(&xml_options.images).into_iter()
-                {
-                    pdf.resources
-                        .xobjects
-                        .map
-                        .insert(xobject_id, crate::XObject::Image(raw_image));
-                }
+                crate::html::bridge::register_images(
+                    &mut pdf.resources,
+                    crate::html::bridge::resolve_html_images_with_placeholders(
+                        &xml_options.images,
+                        &xml_options.image_placeholders,
+                    ),
+                    &xml_options.image_placeholders,
+                );
 
                 bridge_res.register_into(&mut pdf.resources);
 
