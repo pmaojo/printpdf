@@ -123,7 +123,7 @@ text-diff = "0.4.0"
 lopdf = { version = "0.44.0", default-features = false }
 
 [features]
-default = ["html"]
+default = ["html", "text_layout_hyphenation"]
 # Basic text layout without hyphenation
 # `dep:rust-fontconfig` is required (not just by `html`): printpdf attaches the source
 # font bytes to every ParsedFont via `with_source_bytes(Arc<rust_fontconfig::FontBytes>)`,
@@ -132,8 +132,11 @@ default = ["html"]
 text_layout = ["dep:azul-css", "dep:azul-core", "dep:azul-layout", "dep:rust-fontconfig", "azul-layout/std", "azul-layout/text_layout", "azul-layout/font_loading"]
 # Add hyphenation support
 text_layout_hyphenation = ["text_layout", "azul-layout/text_layout_hyphenation"]
-# HTML/CSS layout
-html = ["text_layout_hyphenation", "dep:xmlparser", "dep:rust-fontconfig", "azul-layout/xml", "azul-layout/pdf"]
+# HTML/CSS layout. Automatic hyphenation (`hyphens: auto`, ~3 MB of embedded
+# dictionaries for every language) is a separate feature, on by default: a
+# build that never hyphenates can leave it out with
+# `default-features = false, features = ["html"]`.
+html = ["text_layout", "dep:xmlparser", "dep:rust-fontconfig", "azul-layout/xml", "azul-layout/pdf"]
 # HTML with multithreaded font loading (faster on desktop, not available on WASM)
 html_multithreaded = ["html", "rust-fontconfig/multithreading", "azul-layout/font_loading_multithreaded"]
 # SVG support
