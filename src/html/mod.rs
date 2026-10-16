@@ -123,6 +123,14 @@ pub struct XmlRenderOptions {
     /// Embedded fonts (key = font name, value = font bytes)
     #[serde(default)]
     pub fonts: BTreeMap<String, Vec<u8>>,
+    /// Images laid out by size alone (key = image ID, value = width and height
+    /// in px). Layout treats each one exactly like an embedded image of that
+    /// intrinsic size, and the document gets a stand-in XObject that paints the
+    /// same box with no pixel data: for callers that write the image stream
+    /// themselves after saving (a JPEG passed through as `/DCTDecode`, a vector
+    /// Form). An ID present in `images` too is taken from `images`.
+    #[serde(default)]
+    pub image_placeholders: BTreeMap<String, (u32, u32)>,
     /// Page width in millimeters
     #[serde(default = "default_page_width")]
     pub page_width: Mm,
@@ -161,6 +169,7 @@ impl Default for XmlRenderOptions {
         Self {
             images: BTreeMap::new(),
             fonts: BTreeMap::new(),
+            image_placeholders: BTreeMap::new(),
             page_width: default_page_width(),
             page_height: default_page_height(),
             margins: PageMargins::default(),
@@ -589,7 +598,8 @@ pub fn xml_to_pdf_pages(
     // Decode embedded `<img>` bytes up front: layout needs each image's real
     // size (it only sees a tagged 0x0 placeholder), and the bridge needs the
     // pixels afterwards.
-    let resolved_images = bridge::resolve_html_images(&options.images);
+    let resolved_images =
+        bridge::resolve_html_images_with_placeholders(&options.images, &options.image_placeholders);
     let image_cache = bridge::image_cache_for(&resolved_images);
     let display_lists = match layout_document_paged_v2(
         &mut layout_cache,
@@ -881,7 +891,8 @@ pub fn xml_to_pdf_pages_debug(
     // Decode embedded `<img>` bytes up front: layout needs each image's real
     // size (it only sees a tagged 0x0 placeholder), and the bridge needs the
     // pixels afterwards.
-    let resolved_images = bridge::resolve_html_images(&options.images);
+    let resolved_images =
+        bridge::resolve_html_images_with_placeholders(&options.images, &options.image_placeholders);
     let image_cache = bridge::image_cache_for(&resolved_images);
     let display_lists = match layout_document_paged_v2(
         &mut layout_cache,
@@ -1101,13 +1112,7 @@ pub fn add_xml_to_document(
             }
             // Register `<img>` images as PDF Image XObjects under the same
             // deterministic ids the bridge used for its `UseXobject` ops.
-            for (_src, (xobject_id, raw_image)) in images.into_iter() {
-                document
-                    .resources
-                    .xobjects
-                    .map
-                    .insert(xobject_id, crate::XObject::Image(raw_image));
-            }
+            bridge::register_images(&mut document.resources, images, &options.image_placeholders);
             bridge_res.register_into(&mut document.resources);
             document.pages.extend(pages);
             Ok(())
