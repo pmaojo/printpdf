@@ -1,7 +1,4 @@
-use std::{
-    io::Read,
-    sync::atomic::{AtomicUsize, Ordering},
-};
+use std::sync::atomic::{AtomicUsize, Ordering};
 
 use crate::date::OffsetDateTime;
 
@@ -98,24 +95,6 @@ pub(crate) fn to_pdf_xmp_date(date: &OffsetDateTime) -> String {
 #[inline(always)]
 fn u8_to_char(input: u8) -> char {
     (b'A' + input) as char
-}
-
-#[allow(dead_code)]
-pub(crate) fn compress(bytes: &[u8]) -> Vec<u8> {
-    use std::io::prelude::*;
-
-    use flate2::{write::GzEncoder, Compression};
-    let mut encoder = GzEncoder::new(Vec::new(), Compression::best());
-    let _ = encoder.write_all(bytes);
-    encoder.finish().unwrap_or_default()
-}
-
-pub(crate) fn uncompress(bytes: &[u8]) -> Vec<u8> {
-    use flate2::read::GzDecoder;
-    let mut gz = GzDecoder::new(bytes);
-    let mut s = Vec::<u8>::new();
-    let _ = gz.read_to_end(&mut s);
-    s
 }
 
 #[cfg(test)]

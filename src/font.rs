@@ -618,7 +618,7 @@ impl BuiltinFont {
     pub fn check_if_matches(bytes: &[u8]) -> Option<Self> {
         let matching_based_on_len = match_len(bytes)?;
         // if the length is equal, check for equality
-        if bytes == matching_based_on_len.get_subset_font().bytes.as_slice() {
+        if bytes == matching_based_on_len.subset_bytes() {
             Some(matching_based_on_len)
         } else {
             None
@@ -628,8 +628,7 @@ impl BuiltinFont {
     /// Get a ParsedFont for this builtin font
     /// This allows builtin fonts to support text shaping
     pub fn get_parsed_font(&self) -> Option<ParsedFont> {
-        let subset = self.get_subset_font();
-        ParsedFont::from_bytes(&subset.bytes, 0, &mut Vec::new())
+        ParsedFont::from_bytes(self.subset_bytes(), 0, &mut Vec::new())
     }
 
     /// Returns a CSS font-family string appropriate for the built-in PDF font.
@@ -686,55 +685,36 @@ impl BuiltinFont {
         }
     }
 
+    /// The already-subsetted font file (Win-1252 codepage), as compiled in.
+    ///
+    /// Stored uncompressed: these 746 KB were gzipped and inflated on every
+    /// HTML render (the 14 faces are registered each time), which was a fifth
+    /// of a one-page invoice. Uncompressed they cost ~270 KB of binary and
+    /// are borrowed, never copied or decoded.
+    pub fn subset_bytes(&self) -> &'static [u8] {
+        use self::BuiltinFont::*;
+        match self {
+            TimesRoman => include_bytes!("../defaultfonts/Times-Roman.subset.ttf"),
+            TimesBold => include_bytes!("../defaultfonts/Times-Bold.subset.ttf"),
+            TimesItalic => include_bytes!("../defaultfonts/Times-Italic.subset.ttf"),
+            TimesBoldItalic => include_bytes!("../defaultfonts/Times-BoldItalic.subset.ttf"),
+            Helvetica => include_bytes!("../defaultfonts/Helvetica.subset.ttf"),
+            HelveticaBold => include_bytes!("../defaultfonts/Helvetica-Bold.subset.ttf"),
+            HelveticaOblique => include_bytes!("../defaultfonts/Helvetica-Oblique.subset.ttf"),
+            HelveticaBoldOblique => include_bytes!("../defaultfonts/Helvetica-BoldOblique.subset.ttf"),
+            Courier => include_bytes!("../defaultfonts/Courier.subset.ttf"),
+            CourierOblique => include_bytes!("../defaultfonts/Courier-Oblique.subset.ttf"),
+            CourierBold => include_bytes!("../defaultfonts/Courier-Bold.subset.ttf"),
+            CourierBoldOblique => include_bytes!("../defaultfonts/Courier-BoldOblique.subset.ttf"),
+            Symbol => include_bytes!("../defaultfonts/Symbol.subset.ttf"),
+            ZapfDingbats => include_bytes!("../defaultfonts/ZapfDingbats.subset.ttf"),
+        }
+    }
+
     /// Returns the already-subsetted font (Win-1252 codepage)
     pub fn get_subset_font(&self) -> SubsetFont {
-        use self::BuiltinFont::*;
-
         SubsetFont {
-            bytes: match self {
-                TimesRoman => crate::utils::uncompress(include_bytes!(
-                    "../defaultfonts/Times-Roman.subset.ttf"
-                )),
-                TimesBold => crate::utils::uncompress(include_bytes!(
-                    "../defaultfonts/Times-Bold.subset.ttf"
-                )),
-                TimesItalic => crate::utils::uncompress(include_bytes!(
-                    "../defaultfonts/Times-Italic.subset.ttf"
-                )),
-                TimesBoldItalic => crate::utils::uncompress(include_bytes!(
-                    "../defaultfonts/Times-BoldItalic.subset.ttf"
-                )),
-                Helvetica => {
-                    crate::utils::uncompress(include_bytes!("../defaultfonts/Helvetica.subset.ttf"))
-                }
-                HelveticaBold => crate::utils::uncompress(include_bytes!(
-                    "../defaultfonts/Helvetica-Bold.subset.ttf"
-                )),
-                HelveticaOblique => crate::utils::uncompress(include_bytes!(
-                    "../defaultfonts/Helvetica-Oblique.subset.ttf"
-                )),
-                HelveticaBoldOblique => crate::utils::uncompress(include_bytes!(
-                    "../defaultfonts/Helvetica-BoldOblique.subset.ttf"
-                )),
-                Courier => {
-                    crate::utils::uncompress(include_bytes!("../defaultfonts/Courier.subset.ttf"))
-                }
-                CourierOblique => crate::utils::uncompress(include_bytes!(
-                    "../defaultfonts/Courier-Oblique.subset.ttf"
-                )),
-                CourierBold => crate::utils::uncompress(include_bytes!(
-                    "../defaultfonts/Courier-Bold.subset.ttf"
-                )),
-                CourierBoldOblique => crate::utils::uncompress(include_bytes!(
-                    "../defaultfonts/Courier-BoldOblique.subset.ttf"
-                )),
-                Symbol => {
-                    crate::utils::uncompress(include_bytes!("../defaultfonts/Symbol.subset.ttf"))
-                }
-                ZapfDingbats => crate::utils::uncompress(include_bytes!(
-                    "../defaultfonts/ZapfDingbats.subset.ttf"
-                )),
-            },
+            bytes: self.subset_bytes().to_vec(),
             glyph_mapping: FONTS
                 .iter()
                 .filter_map(|(font_id, old_gid, new_gid, char)| {
@@ -1812,7 +1792,8 @@ mod test {
                     env!("CARGO_MANIFEST_DIR"),
                     name.get_id()
                 ),
-                crate::utils::compress(&subset.bytes),
+                // Uncompressed: see `BuiltinFont::subset_bytes`.
+                &subset.bytes,
             );
             for (old_gid, (new_gid, char)) in subset.glyph_mapping.iter() {
                 // glyph_mapping values are Strings now (ligatures carry several

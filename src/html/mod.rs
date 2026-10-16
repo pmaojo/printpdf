@@ -375,31 +375,40 @@ fn builtin_generic_family(font: BuiltinFont) -> Option<&'static str> {
 fn register_builtin_fonts<T: azul_layout::font_traits::ParsedFontTrait>(
     font_manager: &mut FontManager<T>,
 ) {
-    for font in BuiltinFont::all_ids() {
-        let bytes = font.get_subset_font().bytes;
-
-        // Real coverage matters: azul skips empty-`unicode_ranges` faces during
-        // per-character fallback, and these subsets only cover Win-1252 — so a
-        // codepoint outside it has to be able to fall through to another font.
-        let coverage: Vec<rust_fontconfig::UnicodeRange> =
-            rust_fontconfig::FcParseFontBytes(&bytes, font.get_id())
-                .and_then(|faces| faces.into_iter().next())
-                .map_or_else(Vec::new, |(pattern, _)| pattern.unicode_ranges);
+    // Real coverage matters: azul skips empty-`unicode_ranges` faces during
+    // per-character fallback, and these subsets only cover Win-1252 — so a
+    // codepoint outside it has to be able to fall through to another font.
+    // The faces are compiled in, so it is read once per process, not once per
+    // render (14 full parses of each face, a few % of a one-page invoice).
+    static COVERAGE: std::sync::OnceLock<Vec<Vec<rust_fontconfig::UnicodeRange>>> =
+        std::sync::OnceLock::new();
+    let coverages = COVERAGE.get_or_init(|| {
+        BuiltinFont::all_ids()
+            .iter()
+            .map(|font| {
+                rust_fontconfig::FcParseFontBytes(font.subset_bytes(), font.get_id())
+                    .and_then(|faces| faces.into_iter().next())
+                    .map_or_else(Vec::new, |(pattern, _)| pattern.unicode_ranges)
+            })
+            .collect()
+    });
+    for (font, coverage) in BuiltinFont::all_ids().into_iter().zip(coverages) {
+        let bytes = font.subset_bytes();
 
         // The PDF base-14 name itself (`Helvetica-Bold`), then the CSS spellings.
         register_all_spellings(
             font_manager,
             font.get_id(),
-            &bytes,
-            &coverage,
+            bytes,
+            coverage,
             MemoryFontTier::Primary,
         );
         for css_name in builtin_font_css_names(font) {
             register_all_spellings(
                 font_manager,
                 css_name,
-                &bytes,
-                &coverage,
+                bytes,
+                coverage,
                 MemoryFontTier::Primary,
             );
         }
@@ -407,8 +416,8 @@ fn register_builtin_fonts<T: azul_layout::font_traits::ParsedFontTrait>(
             register_all_spellings(
                 font_manager,
                 generic,
-                &bytes,
-                &coverage,
+                bytes,
+                coverage,
                 MemoryFontTier::Fallback,
             );
         }
