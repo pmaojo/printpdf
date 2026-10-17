@@ -751,7 +751,7 @@ pub fn xml_to_pdf_pages_tracked(
     let mut tracked = TrackedBoxes::new();
     let mut tracked_memo = BTreeMap::new();
 
-    for display_list in display_lists.iter() {
+    for display_list in display_lists.into_iter() {
         // Skip pages that have no meaningful content (only plain background
         // fills). A page is "real" if it has text, an image, a gradient or a
         // shadow — anything a reader would actually perceive as content.
@@ -1103,7 +1103,7 @@ pub fn xml_to_pdf_pages_debug(
     // Full page size for PDF coordinate transformation
     let full_page_size = LogicalSize::new(page_width_pt, page_height_pt);
     
-    for (page_idx, display_list) in display_lists.iter().enumerate() {
+    for (page_idx, display_list) in display_lists.into_iter().enumerate() {
         // Debug: capture display list info for first page only
         if page_idx == 0 {
             let mut dl_debug = String::new();
